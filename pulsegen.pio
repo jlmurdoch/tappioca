@@ -1,0 +1,49 @@
+.pio_version 0
+
+.program pulsegen
+
+; This variant resets at END
+; Therefore it is needed to set the pulse correctly at start (e.g. sleep)
+
+hi_begin:
+    set PINS, 1	    ; set HIGH
+    out Y, 16	    ; 16-bit from OSR - 0 padded
+    jmp !Y lo_begin ; if 0, set to LOW and wait
+hi_loop:
+    jmp Y-- hi_loop	; loop for the 16-bit value
+
+lo_begin:
+    set PINS, 0	    ; set LOW
+    out Y, 16	    ; 16-bit from OSR - 0 padded
+    jmp !Y hi_begin ; if 0, set to HIGH and wait
+lo_loop:		 
+    jmp Y-- lo_loop	; loop for the 16-bit value
+
+% c-sdk {
+static inline void pulsegen_program_init(PIO pio, uint sm, uint offset, uint pin, float div) {
+    // Create SM config
+    pio_sm_config c = pulsegen_program_get_default_config(offset);
+
+    // Map SET pin group
+    sm_config_set_set_pins(&c, pin, 1);
+
+    // Set GPIO function to pin
+    pio_gpio_init(pio, pin);
+
+    // Set pin to output
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+
+    // Set Clock
+    sm_config_set_clkdiv(&c, div);
+
+    // OUT shift_right, autopull, 16-bit pull_threshold
+    sm_config_set_out_shift(&c, true, true, 16);
+
+    // OUT only needed, so make 8-word
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+
+    // Appy the config
+    pio_sm_init(pio, sm, offset, &c);
+}
+%}
+
