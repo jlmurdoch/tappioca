@@ -4,16 +4,14 @@ Play back ZX Spectrum TZX / TAP files over GPIO-powered audio using the [RP2040 
 
 ## Build
 (Optional) Add the following 3rd-party libraries into the sources directory if needed:
-- [no-OS-FatFS-SD-SPI-RPi-Pico](https://github.com/carlk3/no-OS-FatFS-SD-SPI-RPi-Pico) - for SD Card support for storing TZX and TAP files
-- [zlib-deflate-nostdlib](https://github.com/derf/zlib-deflate-nostdlib/) - for Zlib inflate support need by some rare CSW data blocks 
+- [no-OS-FatFS-SD-SPI-RPi-Pico](https://github.com/carlk3/no-OS-FatFS-SD-SPI-RPi-Pico) - for SD Card support for storing TZX and TAP files. Drop in `FatFS_SPI` directory into the main source directory.
+- [zlib-deflate-nostdlib](https://github.com/derf/zlib-deflate-nostdlib/) - for Zlib inflate support need by some rare CSW data blocks. Drop in `inflate.c` and `inflate.h`i into the main source directory.
 
 Then configure and build:
 ```
-vi CMakeLists.txt # Uncomment SD Card / ZLib Inflate options if needed
-vi main.c         # Uncomment SD Card / ZLib Inflate defines if needed
 mkdir build
 cd build
-cmake ..
+cmake .. -DUSE_ZLIB=ON -DUSE_FATFS=ON # Optional parameters
 make
 ```
 
@@ -55,7 +53,6 @@ Tape files can either be stored in RP2040 memory or retrieved from an SD Card. T
 - Optional: TZX or TAP files
 
 ## What is left to do? What could be added?
-- Fix the CMakeLists.txt to allow easier enabling of Zlib & SD Card support
 - General optimisation (memory, code, etc)
 - Debugging printf() for troubleshooting
 - Read direct from SD card rather than using memory

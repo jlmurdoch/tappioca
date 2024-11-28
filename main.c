@@ -13,12 +13,12 @@
 // #define FREQ 3540000 // ZX Spectrum 128K clock frequency
 
 // User Customisations
-// #define SDCARD 1 // Enable SD Card support
-// #define ZLIB 1 // Enable CSW Compression support
+// #define USE_FATFS 1 // Enable SD Card support
+// #define USE_ZLIB 1 // Enable CSW Compression support
 #define AUDIO_PIN 28 // Output GPIO (Olimex PICO PC - PWM Audio Left on GPIO 28)
 
 // Tapes used for testing
-// #define FILENAME "DIZZY7.tzx"   // Block: Turbo Loader
+#define FILENAME "DIZZY7.tzx"   // Block: Turbo Loader
 // #define FILENAME "AAHKU.tzx"    // Block: Pure Tone (Speed Loader)
 // #define FILENAME "FIRST.tzx"    // Block: RAW Data (Direct Recording)
 // #define FILENAME "EXPLOSIO.tzx" // Block: CSW Data (Compressed Square Wave)
@@ -32,7 +32,7 @@
  * For SD Card Support, embed FatFs_SPI from and edit hw_config.c:
  * https://github.com/carlk3/no-OS-FatFS-SD-SPI-RPi-Pico
  */
-#ifdef SDCARD
+#ifdef USE_FATFS
 // Use SD Card
 #include "f_util.h"
 #include "ff.h"
@@ -48,7 +48,7 @@
  * For CSW compression, embed inflate.c / inflate.h from:
  * https://github.com/derf/zlib-deflate-nostdlib
  */
-#ifdef ZLIB
+#ifdef USE_ZLIB
 #include "inflate.h"
 #endif
 
@@ -116,7 +116,7 @@ typedef struct t_block_desc
     uint32_t blklen;
 } t_block_desc;
 
-#ifdef SDCARD
+#ifdef USE_FATFS
 uint32_t get_tzx_from_sdcard(uint8_t **tape, char tzxfile[])
 {
     FIL fh;
@@ -527,7 +527,7 @@ void send_csw_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
         // Z-RLE - Decompress / Inflate
         // Assume most samples are 5 bytes (>255 t-states)
         d_rle = malloc(5 * 2 * blk.d_total);
-#ifdef ZLIB
+#ifdef USE_ZLIB
         s_rle = inflate_zlib(buf, blk.blklen - 11, d_rle, 5 * 2 * blk.d_total);
 #endif
         // If inflate_zlib fails, exit gracefully
@@ -767,7 +767,7 @@ int main()
     PIO pio = pio0;
     assert(AUDIO_PIN < 31);
 
-#ifdef SDCARD
+#ifdef USE_FATFS
     // Get the TZX data off the SD card
     uint8_t *tape = NULL;
     tapesize = get_tzx_from_sdcard(&tape, FILENAME);
