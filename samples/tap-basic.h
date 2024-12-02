@@ -2,7 +2,7 @@
  * A basic TAP example (a program that prints "HELLO")
  */
 
-static uint8_t tape[] = {
+static uint8_t buf[] = {
 	/*
 	 * Header Block
 	 */

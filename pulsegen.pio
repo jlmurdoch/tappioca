@@ -2,7 +2,8 @@
 
 .program pulsegen
 
-; This variant resets at END
+; Start state is LOW, so State Machine should be started close to first pulse
+; This variant sends an edge at END of duration
 ; Therefore it is needed to set the pulse correctly at start (e.g. sleep)
 
 hi_begin:

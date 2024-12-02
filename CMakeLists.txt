@@ -16,8 +16,14 @@ option(USE_FATFS, "Use FatFS" OFF)
 option(USE_ZLIB, "Use Zlib" OFF)
 
 if(USE_FATFS)
-    add_subdirectory(FatFs_SPI)
+    add_subdirectory(no-OS-FatFS-SD-SPI-RPi-Pico/FatFs_SPI)
 endif(USE_FATFS)
+#if(USE_ZLIB)
+#    INSTALL (
+#        DIRECTORY ${CMAKE_SOURCE_DIR}/zlib-deflate-nostdlib/src/
+#        DESTINATION ${CMAKE_SOURCE_DIR}
+#        FILES_MATCHING PATTERN "inflate.*")
+#endif(USE_ZLIB)
 
 add_executable(tappioca)
 
@@ -32,7 +38,7 @@ if(USE_FATFS)
 endif(USE_FATFS)
 if(USE_ZLIB)
     target_compile_definitions(tappioca PRIVATE USE_ZLIB=1)
-    target_sources(tappioca PRIVATE inflate.c)
+    target_sources(tappioca PRIVATE zlib-deflate-nostdlib/src/inflate.c)
 endif(USE_ZLIB)
 
 target_link_libraries(tappioca PRIVATE pico_stdlib hardware_pio)

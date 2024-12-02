@@ -2,7 +2,7 @@
  * A basic TZX example (a program that prints "HELLO")
  */
 
-static uint8_t tape[] = {
+static uint8_t buf[] = {
 	/*
 	 * TZX Header (10 bytes)
 	 */

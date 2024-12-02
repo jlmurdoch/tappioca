@@ -30,7 +30,7 @@
 
 /*
  * For SD Card Support, embed FatFs_SPI from and edit hw_config.c:
- * https://github.com/carlk3/no-OS-FatFS-SD-SPI-RPi-Pico
+ * git clone https://github.com/carlk3/no-OS-FatFS-SD-SPI-RPi-Pico
  */
 #ifdef USE_FATFS
 // Use SD Card
@@ -46,16 +46,19 @@
 
 /*
  * For CSW compression, embed inflate.c / inflate.h from:
- * https://github.com/derf/zlib-deflate-nostdlib
+ * git clone https://github.com/derf/zlib-deflate-nostdlib
  */
 #ifdef USE_ZLIB
-#include "inflate.h"
+#include "zlib-deflate-nostdlib/src/inflate.h"
 #endif
 
-int gpio_level = 1; // we will start LOW (and be held that way on first pulse)
+// "An emulator should put the current pulse_level to low when starting to play"
+// First pulse will be HIGH, then go to LOW
+int gpio_level = 1; 
 
 enum blocks
 {
+    // Data blocks
     BLK_STD = 0x10,
     BLK_TURBO,
     BLK_TONE,
@@ -64,6 +67,7 @@ enum blocks
     BLK_DIRECT,
     BLK_CSW = 0x18,
     BLK_GENERAL,
+    // Behaviour blocks
     BLK_PAUSE = 0x20,
     BLK_GROUP_START,
     BLK_GROUP_END,
@@ -75,11 +79,13 @@ enum blocks
     BLK_SEL,
     BLK_STOP_48K = 0x2A,
     BLK_SIG_LEVEL,
+    // Informational blocks
     BLK_TEXT = 0x30,
     BLK_MSG,
     BLK_INFO,
     BLK_HARDWARE,
     BLK_CUSTOM = 0x35,
+    // Concatentation block
     BLK_GLUE = 0x5A
 };
 
@@ -94,8 +100,8 @@ typedef struct t_block_desc
     uint16_t p_pulse;
     uint16_t sync_a;
     uint16_t sync_b;
-    uint16_t bit_zero;
-    uint16_t bit_one;
+    uint16_t bit_0;
+    uint16_t bit_1;
     uint8_t used_bits;
 
     // For pulses
@@ -113,11 +119,11 @@ typedef struct t_block_desc
     uint8_t compression;
 
     // Length (data or block)
-    uint32_t blklen;
+    uint32_t len;
 } t_block_desc;
 
 #ifdef USE_FATFS
-uint32_t get_tzx_from_sdcard(uint8_t **tape, char tzxfile[])
+uint32_t get_file_from_sdcard(uint8_t **filedata, char filename[])
 {
     FIL fh;
     FRESULT fres;
@@ -130,21 +136,21 @@ uint32_t get_tzx_from_sdcard(uint8_t **tape, char tzxfile[])
         panic("f_mount error: %s (%d)\n", FRESULT_str(fres), fres);
 
     // Open file
-    fres = f_open(&fh, tzxfile, FA_READ);
+    fres = f_open(&fh, filename, FA_READ);
     if (FR_OK != fres && FR_EXIST != fres)
-        panic("f_open(%s) error: %s (%d)\n", tzxfile, FRESULT_str(fres), fres);
+        panic("f_open(%s) error: %s (%d)\n", filename, FRESULT_str(fres), fres);
 
     // Get file size and allocate memory
-    uint32_t tapesize = f_size(&fh);
-    printf("Found file '%s': %u bytes\n", tzxfile, tapesize);
-    *tape = malloc(tapesize * sizeof(uint8_t));
-    if (*tape == NULL)
+    uint32_t filesize = f_size(&fh);
+    printf("Found file '%s': %u bytes\n", filename, filesize);
+    *filedata = malloc(filesize * sizeof(uint8_t));
+    if (*filedata == NULL)
     {
         printf("malloc error: cannot allocate memory\n");
     }
 
     // Read file into memory
-    fres = f_read(&fh, *tape, tapesize, NULL);
+    fres = f_read(&fh, *filedata, filesize, NULL);
     if (FR_OK != fres)
     {
         printf("f_read error: %s (%d)\n", FRESULT_str(fres), fres);
@@ -160,24 +166,23 @@ uint32_t get_tzx_from_sdcard(uint8_t **tape, char tzxfile[])
     // Unmount SD card
     f_unmount(pSD->pcName);
 
-    return tapesize;
+    return filesize;
 }
 #endif
 
-uint32_t parse_int(uint8_t buf[], int width)
+uint32_t parse_uint(uint8_t ptr[], int width)
 {
     uint32_t value = 0;
     for (int x = 0; x < width; x++)
-    {
-        value |= (buf[x] << (x * 8));
-    }
+        value |= (ptr[x] << (x * 8));
+
     return value;
 }
 
-uint32_t *validate_tape(uint8_t buf[], uint32_t file_len)
+uint32_t *validate_file(uint8_t filedata[], uint32_t filesize)
 {
     /*
-     * This validates the tape by making sure the length adds up
+     * This validates the file by making sure the length adds up
      * Also notes block offsets used by 0x23, 0x26, 0x28
      *
      * Not using this to store further metadata to save memory
@@ -188,11 +193,12 @@ uint32_t *validate_tape(uint8_t buf[], uint32_t file_len)
     uint32_t length, addr = 0;
 
     // Check if there's a TZX header: { "Z", "X", "T", }
-    if ((buf[0] == 0x5A) && (buf[1] == 0x58) && (buf[2] == 0x54))
+    if ((filedata[0] == 0x5A) && (filedata[1] == 0x58) && (filedata[2] == 0x54))
     {
+        printf("Start of TZX...\n");
         addr = 10; // Skip TZX header
 
-        while (addr < file_len)
+        while (addr < filesize)
         {
             /*
              * Calculate the block length:
@@ -200,17 +206,17 @@ uint32_t *validate_tape(uint8_t buf[], uint32_t file_len)
              * - Block Attributes size +
              * - Block Data size (from attribute)
              */
-            switch (buf[addr])
+            switch (filedata[addr])
             {
             /*
              * DATA BLOCKS
              */
             case BLK_STD:
-                length = 5 + parse_int(buf + addr + 0x03, 2);
+                length = 5 + parse_uint(filedata+addr+3, 2);
                 break;
 
             case BLK_TURBO:
-                length = 19 + parse_int(buf + addr + 0x10, 3);
+                length = 19 + parse_uint(filedata+addr+16, 3);
                 break;
 
             case BLK_TONE:
@@ -218,23 +224,23 @@ uint32_t *validate_tape(uint8_t buf[], uint32_t file_len)
                 break;
 
             case BLK_PULSES:
-                length = 2 + parse_int(buf + addr + 0x01, 1) * 2;
+                length = 2 + parse_uint(filedata+addr+1, 1) * 2;
                 break;
 
             case BLK_PDATA:
-                length = 11 + parse_int(buf + addr + 0x08, 3);
+                length = 11 + parse_uint(filedata+addr+8, 3);
                 break;
 
             case BLK_DIRECT:
-                length = 9 + parse_int(buf + addr + 0x06, 3);
+                length = 9 + parse_uint(filedata+addr+6, 3);
                 break;
 
             case BLK_CSW:
-                length = 5 + parse_int(buf + addr + 0x01, 4);
+                length = 5 + parse_uint(filedata+addr+1, 4);
                 break;
 
             case BLK_GENERAL:
-                length = 5 + parse_int(buf + addr + 0x01, 4);
+                length = 5 + parse_uint(filedata+addr+1, 4);
                 break;
 
             /*
@@ -245,7 +251,7 @@ uint32_t *validate_tape(uint8_t buf[], uint32_t file_len)
                 break;
 
             case BLK_GROUP_START:
-                length = 2 + parse_int(buf + addr + 0x01, 1);
+                length = 2 + parse_uint(filedata+addr+1, 1);
                 break;
 
             case BLK_GROUP_END:
@@ -266,7 +272,7 @@ uint32_t *validate_tape(uint8_t buf[], uint32_t file_len)
 
             case BLK_SEQ_CALL:
                 // Array is word-based
-                length = 3 + parse_int(buf + addr + 0x01, 2) * 2;
+                length = 3 + parse_uint(filedata+addr+1, 2) * 2;
                 break;
 
             case BLK_SEQ_RET:
@@ -275,7 +281,7 @@ uint32_t *validate_tape(uint8_t buf[], uint32_t file_len)
 
             case BLK_SEL:
                 // Use length of BLOCK, not SELECTIONS
-                length = 3 + parse_int(buf + addr + 0x01, 2);
+                length = 3 + parse_uint(filedata+addr+1, 2);
                 break;
 
             case BLK_STOP_48K:
@@ -290,25 +296,25 @@ uint32_t *validate_tape(uint8_t buf[], uint32_t file_len)
              * INFO BLOCKS
              */
             case BLK_TEXT:
-                length = 2 + parse_int(buf + addr + 0x01, 1);
+                length = 2 + parse_uint(filedata+addr+1, 1);
                 break;
 
             case BLK_MSG:
-                length = 3 + parse_int(buf + addr + 0x02, 1);
+                length = 3 + parse_uint(filedata+addr+2, 1);
                 break;
 
             case BLK_INFO:
                 // Note: this is BLOCK length, not TEXT
-                length = 3 + parse_int(buf + addr + 0x01, 2);
+                length = 3 + parse_uint(filedata+addr+1, 2);
                 break;
 
             case BLK_HARDWARE:
                 // This is an array of 3 bytes
-                length = 2 + parse_int(buf + addr + 0x01, 1) * 3;
+                length = 2 + parse_uint(filedata+addr+1, 1) * 3;
                 break;
 
             case BLK_CUSTOM:
-                length = 21 + parse_int(buf + addr + 0x11, 4);
+                length = 21 + parse_uint(filedata+addr+17, 4);
                 break;
 
             /*
@@ -319,12 +325,12 @@ uint32_t *validate_tape(uint8_t buf[], uint32_t file_len)
                 break;
 
             default:
-                printf("%02x unknown!\n", buf[addr]);
+                printf("%02x unknown!\n", filedata[addr]);
                 free(block_addr);
                 return NULL;
             }
             // Block checks out, add it
-            printf("%u: Type: 0x%02x, Bytes: %u\n", i, buf[addr], length);
+            printf("%u: Type: 0x%02x, Bytes: %u\n", i, filedata[addr], length);
             block_addr[i++] = addr;
             addr += length;
 
@@ -332,25 +338,26 @@ uint32_t *validate_tape(uint8_t buf[], uint32_t file_len)
             block_addr = realloc(block_addr, (i + 1) * sizeof(uint32_t));
             block_addr[i] = UINT32_MAX;
         }
-        if (addr == file_len)
+        if (addr == filesize)
         {
-            printf("End of TZX %u of %u\n", addr, file_len);
+            printf("End of TZX %u of %u\n", addr, filesize);
             return block_addr;
         }
         else
         {
-            printf("Unexpected End\n", addr, file_len);
+            printf("Unexpected End\n", addr, filesize);
             free(block_addr);
             return NULL;
         }
     }
     else
     {
+        printf("Start of TAP?...\n");
         // Try to see if it's a TAP file - hope all the lengths add up!
-        while (addr < file_len)
+        while (addr < filesize)
         {
             // Length word + data
-            length = 2 + parse_int(buf + addr, 2);
+            length = 2 + parse_uint(filedata+addr, 2);
 
             // Add block to list
             printf("%u: Bytes: %u\n", i, length);
@@ -363,78 +370,76 @@ uint32_t *validate_tape(uint8_t buf[], uint32_t file_len)
             // Move to next part
             addr += length;
         }
-        if (addr == file_len)
+        if (addr == filesize)
         {
-            printf("End of TAP %u of %u\n", addr, file_len);
+            printf("End of TAP %u of %u\n", addr, filesize);
             return block_addr;
         }
         else
         {
-            printf("Unexpected End\n", addr, file_len);
-            free(block_addr);
-            return NULL;
+            printf("Unexpected End\n", addr, filesize);
         }
     }
 
-    printf("Not a valid tape file\n");
+    printf("Not a valid file (TZX or TAP)\n");
     free(block_addr);
     return NULL;
 }
 
 // Send the pulse of duration ticks
-void send_pulse(PIO pio, int sm, uint16_t duration)
+void send_pulse(PIO pio, int pio_sm, uint16_t duration)
 {
     if (duration > 0)
     {
         // Send pulse with assembler offset
-        pio_sm_put_blocking(pio, sm, duration - ASM_OFFSET);
+        pio_sm_put_blocking(pio, pio_sm, duration - ASM_OFFSET);
         // State tracker for signal levels
         gpio_level ^= 1;
     }
     else
     {
         // send nothing, means next pulse remains at this level
-        pio_sm_put_blocking(pio, sm, 0);
+        pio_sm_put_blocking(pio, pio_sm, 0);
     }
 }
 
 // Send a tone of fixed length over a number of pulses
-void send_pure_tone_block(PIO pio, int sm, uint16_t pulses, uint16_t duration)
+void send_pure_tone(PIO pio, int pio_sm, uint16_t pulses, uint16_t duration)
 {
     for (uint16_t i = 0; i < pulses; i++)
     {
-        send_pulse(pio, sm, duration);
+        send_pulse(pio, pio_sm, duration);
     }
 }
 
 // Send a stream of pulses of set lengths - CSW and Pulse Sequence blocks
-void send_pulse_array(PIO pio, int sm, uint32_t pulses, uint8_t lengths[])
+void send_pulse_array(PIO pio, int pio_sm, uint32_t pulses, uint8_t lengths[])
 {
     // Lengths are uint16_t
     for (uint32_t i = 0; i < pulses; i++)
     {
-        send_pulse(pio, sm, lengths[i * 2] + (lengths[i * 2 + 1] << 8));
+        send_pulse(pio, pio_sm, parse_uint(lengths + (i * 2), 2));
     }
 }
 
 // Used for raw recordings - not efficient compared to generalised or even CSW
-void send_raw_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
+void send_raw_block(PIO pio, int pio_sm, t_block_desc blk, uint8_t ptr[])
 {
     uint8_t prev_bit = 0;
     uint8_t this_bit = 0;
     int last_bit = 0;
     uint32_t ticks = 0;
 
-    for (uint32_t x = 0; x < blk.blklen; x++)
+    for (uint32_t x = 0; x < blk.len; x++)
     {
-        if ((x == blk.blklen - 1) && (blk.used_bits != 8))
+        if ((x == blk.len - 1) && (blk.used_bits != 8))
         {
             last_bit = 8 - blk.used_bits;
         }
 
         for (int y = 8; --y >= last_bit;)
         {
-            this_bit = ((buf[x] >> y) & 0x1);
+            this_bit = ((ptr[x] >> y) & 0x1);
             if (ticks == 0)
             {
                 // Start the hold
@@ -444,7 +449,7 @@ void send_raw_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
             else if (this_bit != prev_bit)
             {
                 // Take off the hold, send the sample, hold at new level
-                send_pulse(pio, sm, ticks);
+                send_pulse(pio, pio_sm, ticks);
                 ticks = blk.sample_ticks;
                 prev_bit = this_bit;
             }
@@ -457,7 +462,7 @@ void send_raw_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
     }
 }
 
-void send_standard_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
+void send_standard_block(PIO pio, int pio_sm, t_block_desc blk, uint8_t ptr[])
 {
     // Pilot / Sync if the block is not Pure Data
     if (blk.type != 0x14)
@@ -465,23 +470,23 @@ void send_standard_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
         // Pilot tone
         for (uint32_t i = 0; i < blk.p_total; i++)
         {
-            send_pulse(pio, sm, blk.p_pulse);
+            send_pulse(pio, pio_sm, blk.p_pulse);
         }
 
         // Sync - just two pulses
-        send_pulse(pio, sm, blk.sync_a);
-        send_pulse(pio, sm, blk.sync_b);
+        send_pulse(pio, pio_sm, blk.sync_a);
+        send_pulse(pio, pio_sm, blk.sync_b);
     }
 
     /*
      * Payload
      */
     // Process the bytes...
-    for (uint32_t x = 0; x < blk.blklen; x++)
+    for (uint32_t x = 0; x < blk.len; x++)
     {
         // Process the bits in the byte, MSB first..
         int last_bit = 0;
-        if ((x == blk.blklen - 1) && (blk.used_bits != 8))
+        if ((x == blk.len - 1) && (blk.used_bits != 8))
         {
             last_bit = 8 - blk.used_bits;
         }
@@ -489,21 +494,21 @@ void send_standard_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
         for (int y = 8; --y >= last_bit;)
         {
             // Play the appropriate wave for 1 or 0
-            if ((buf[x] >> y) & 0x1)
+            if ((ptr[x] >> y) & 0x1)
             {
-                send_pulse(pio, sm, blk.bit_one);
-                send_pulse(pio, sm, blk.bit_one);
+                send_pulse(pio, pio_sm, blk.bit_1);
+                send_pulse(pio, pio_sm, blk.bit_1);
             }
             else
             {
-                send_pulse(pio, sm, blk.bit_zero);
-                send_pulse(pio, sm, blk.bit_zero);
+                send_pulse(pio, pio_sm, blk.bit_0);
+                send_pulse(pio, pio_sm, blk.bit_0);
             }
         }
     }
 }
 
-void send_csw_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
+void send_csw_block(PIO pio, int pio_sm, t_block_desc blk, uint8_t ptr[])
 {
     uint8_t *pulses = NULL;
     uint8_t *d_rle = NULL;
@@ -528,7 +533,7 @@ void send_csw_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
         // Assume most samples are 5 bytes (>255 t-states)
         d_rle = malloc(5 * 2 * blk.d_total);
 #ifdef USE_ZLIB
-        s_rle = inflate_zlib(buf, blk.blklen - 11, d_rle, 5 * 2 * blk.d_total);
+        s_rle = inflate_zlib(ptr, blk.len - 11, d_rle, 5 * 2 * blk.d_total);
 #endif
         // If inflate_zlib fails, exit gracefully
         if (s_rle < 0)
@@ -541,9 +546,9 @@ void send_csw_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
     else
     {
         // RLE - No decompression needed
-        s_rle = blk.blklen - 11;
+        s_rle = blk.len - 11;
         d_rle = malloc(s_rle);
-        d_rle = buf;
+        d_rle = ptr;
     }
 
     // Convert RLE to array of uint16_t pulse lengths
@@ -567,13 +572,13 @@ void send_csw_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
         }
     }
     // Function processes the CSW now as an array of pulses
-    send_pulse_array(pio, sm, blk.d_total, pulses);
+    send_pulse_array(pio, pio_sm, blk.d_total, pulses);
 
     free(d_rle);
     free(pulses);
 }
 
-void send_gen_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
+void send_gen_block(PIO pio, int pio_sm, t_block_desc blk, uint8_t ptr[])
 {
     // Address tracker, as everything else is now dynamic
     uint32_t dynaddr = 0;
@@ -597,11 +602,11 @@ void send_gen_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
         for (uint8_t x = 0; x < blk.p_symbols; x++)
         {
             // Get the flags for the symbol
-            p_sym_list[x][0] = buf[dynaddr++];
+            p_sym_list[x][0] = ptr[dynaddr++];
             // Get the pulse sequence for the symbol
             for (uint8_t y = 0; y < blk.p_max_pulses; y++)
             {
-                p_sym_list[x][y + 1] = buf[dynaddr++] | buf[dynaddr++] << 8;
+                p_sym_list[x][y + 1] = ptr[dynaddr++] | ptr[dynaddr++] << 8;
             }
         }
 
@@ -610,9 +615,9 @@ void send_gen_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
         for (uint32_t x = 0; x < blk.p_total; x++)
         {
             // Get the symbol value
-            uint8_t symdef = buf[dynaddr++];
+            uint8_t symdef = ptr[dynaddr++];
             // Get the repeat value
-            uint16_t repeat = buf[dynaddr++] | buf[dynaddr++] << 8;
+            uint16_t repeat = ptr[dynaddr++] | ptr[dynaddr++] << 8;
 
             /*
              *   Signal Level Change
@@ -625,20 +630,20 @@ void send_gen_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
             {
             case 0x01:
                 // Get it back to what it was last
-                send_pulse(pio, sm, 0);
+                send_pulse(pio, pio_sm, 0);
                 break;
             case 0x02:
                 // Currently LOW, need HIGH
                 if (gpio_level == 0)
                 {
-                    send_pulse(pio, sm, 0);
+                    send_pulse(pio, pio_sm, 0);
                 }
                 break;
             case 0x03:
                 // Currently HIGH, need LOW again
                 if (gpio_level == 1)
                 {
-                    send_pulse(pio, sm, 0);
+                    send_pulse(pio, pio_sm, 0);
                 }
                 break;
             case 0x00:
@@ -656,7 +661,7 @@ void send_gen_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
                     if (p_sym_list[symdef][z + 1] > 0)
                     {
                         // send the 16-bit pulse
-                        send_pulse(pio, sm, p_sym_list[symdef][z + 1]);
+                        send_pulse(pio, pio_sm, p_sym_list[symdef][z + 1]);
                     }
                 }
             }
@@ -678,11 +683,11 @@ void send_gen_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
         for (uint8_t x = 0; x < blk.d_symbols; x++)
         {
             // Get the flags for the symbol
-            d_sym_list[x][0] = buf[dynaddr++];
+            d_sym_list[x][0] = ptr[dynaddr++];
             // Get the pulse sequence for the symbol
             for (uint8_t y = 0; y < blk.d_max_pulses; y++)
             {
-                d_sym_list[x][y + 1] = buf[dynaddr++] | buf[dynaddr++] << 8;
+                d_sym_list[x][y + 1] = ptr[dynaddr++] | ptr[dynaddr++] << 8;
             }
         }
 
@@ -695,7 +700,7 @@ void send_gen_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
                 // Shift up the previous value
                 bit_cache <<= 8;
                 // Pull in another 8 bits
-                bit_cache |= buf[dynaddr++];
+                bit_cache |= ptr[dynaddr++];
                 // state we've added more bits
                 bit_left += 8;
             }
@@ -717,20 +722,20 @@ void send_gen_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
                 break;
             case 0x01:
                 // Currently X, will be Y, but need X
-                send_pulse(pio, sm, 0);
+                send_pulse(pio, pio_sm, 0);
                 break;
             case 0x02:
                 // Currently HIGH, will be LOW, need HIGH again
                 if (gpio_level == 1)
                 {
-                    send_pulse(pio, sm, 0);
+                    send_pulse(pio, pio_sm, 0);
                 }
                 break;
             case 0x03:
                 // Currently LOW, will be HIGH, need LOW again
                 if (gpio_level == 0)
                 {
-                    send_pulse(pio, sm, 0);
+                    send_pulse(pio, pio_sm, 0);
                 }
                 break;
             default:
@@ -743,7 +748,7 @@ void send_gen_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
                 if (d_sym_list[symdef][z + 1] > 0)
                 {
                     // send the representative 16-bit pulse
-                    send_pulse(pio, sm, d_sym_list[symdef][z + 1]);
+                    send_pulse(pio, pio_sm, d_sym_list[symdef][z + 1]);
                 }
             }
             // Mask only the bits left
@@ -757,7 +762,6 @@ void send_gen_block(PIO pio, int sm, t_block_desc blk, uint8_t buf[])
 
 int main()
 {
-    uint32_t tapesize;
     // Allow stdout/stdin
     stdio_init_all();
     // Pause so we can hook up the stdout
@@ -767,37 +771,39 @@ int main()
     PIO pio = pio0;
     assert(AUDIO_PIN < 31);
 
+    uint32_t bufsize;
 #ifdef USE_FATFS
-    // Get the TZX data off the SD card
-    uint8_t *tape = NULL;
-    tapesize = get_tzx_from_sdcard(&tape, FILENAME);
+    // Get the file data off the SD card
+    uint8_t *buf = NULL;
+    bufsize = get_file_from_sdcard(&buf, FILENAME);
 #else
-    tapesize = sizeof(tape);
+    // Get the file from the header
+    bufsize = sizeof(buf);
 #endif
-    uint32_t *block_start = validate_tape(tape, tapesize);
+    uint32_t *block_start = validate_file(buf, bufsize);
 
     // Pulse generator PIO program - allocate to PIO and State Machine (SM)
-    uint pulsegen_offset;
+    uint pio_offset;
     if (pio_can_add_program(pio, &pulsegen_program))
     {
-        pulsegen_offset = pio_add_program(pio, &pulsegen_program);
+        pio_offset = pio_add_program(pio, &pulsegen_program);
     }
     else
     {
         return -1;
     }
-    int pulsegen_sm = pio_claim_unused_sm(pio, true);
-    if (pulsegen_sm == -1)
+    int pio_sm = pio_claim_unused_sm(pio, true);
+    if (pio_sm == -1)
     {
         return -1;
     }
 
     // Initialise the state machine with PIO, SM, offset, GPIO and clock speed.
     float freq = (float)clock_get_hz(clk_sys) / FREQ;
-    pulsegen_program_init(pio, pulsegen_sm, pulsegen_offset, AUDIO_PIN, freq);
+    pulsegen_program_init(pio, pio_sm, pio_offset, AUDIO_PIN, freq);
 
     // Turn on the state machine
-    pio_sm_set_enabled(pio, pulsegen_sm, true);
+    pio_sm_set_enabled(pio, pio_sm, true);
 
     // Keep looping
     while (true)
@@ -814,7 +820,7 @@ int main()
         uint16_t seq_step = 0, seq_size;
         uint32_t loop_start, loop_count, seq_return;
 
-        printf("Starting tape playback...\n");
+        printf("Starting file playback...\n");
 
         // While we have data...
         while (block_start[block] != UINT32_MAX)
@@ -837,122 +843,122 @@ int main()
 
             // Go to the block
             addr = block_start[block];
-            // printf("%u: ID=%02x, L=%u\n", block, tape[addr], gpio_level);
+            // printf("%u: ID=%02x, L=%u\n", block, buf[addr], gpio_level);
 
             // Go through the TZX block types supported
-            if ((tape[0] == 0x5A) && (tape[1] == 0x58) && (tape[2] == 0x54))
+            if ((buf[0] == 0x5A) && (buf[1] == 0x58) && (buf[2] == 0x54))
             {
-                switch (tape[addr])
+                switch (buf[addr])
                 {
                 /*
                  * Data Blocks
                  */
                 case BLK_STD:
-                    blk.type = tape[addr];
+                    blk.type = buf[addr];
 
                     // Next four bytes contain the pause and data length
-                    blk.pause = tape[addr + 1] | tape[addr + 2] << 8;
-                    blk.blklen = tape[addr + 3] | tape[addr + 4] << 8;
+                    blk.pause = parse_uint(buf+addr+1, 2);
+                    blk.pause = parse_uint(buf+addr+3, 2);
 
                     // Sixth marker byte dictates the pilot length
-                    if (tape[addr + 5] >= 0x80)
+                    if (buf[addr+5] >= 0x80)
                         blk.p_total = 3223; // Data block (0xFF)
                     else
                         blk.p_total = 8063; // Header block (0x00)
 
-                    send_standard_block(pio, pulsegen_sm, blk, tape + addr + 5);
+                    send_standard_block(pio, pio_sm, blk, buf+addr+5);
 
                     break;
 
                 // Turbo Speed
                 case BLK_TURBO:
-                    blk.type = tape[addr];
-                    // Have to define everything from the tape
-                    blk.p_pulse = tape[addr + 1] | tape[addr + 2] << 8;
-                    blk.sync_a = tape[addr + 3] | tape[addr + 4] << 8;
-                    blk.sync_b = tape[addr + 5] | tape[addr + 6] << 8;
-                    blk.bit_zero = tape[addr + 7] | tape[addr + 8] << 8;
-                    blk.bit_one = tape[addr + 9] | tape[addr + 10] << 8;
-                    blk.p_total = tape[addr + 11] | tape[addr + 12] << 8;
-                    blk.used_bits = tape[addr + 13];
-                    blk.pause = tape[addr + 14] | tape[addr + 15] << 8;
-                    blk.blklen = tape[addr + 16] | tape[addr + 17] << 8 | tape[addr + 18] << 16;
+                    blk.type = buf[addr];
+                    // Have to define everything from the file
+                    blk.p_pulse = parse_uint(buf+addr+1, 2);
+                    blk.sync_a = parse_uint(buf+addr+3, 2);
+                    blk.sync_b = parse_uint(buf+addr+5, 2);
+                    blk.bit_0 = parse_uint(buf+addr+7, 2);
+                    blk.bit_1 = parse_uint(buf+addr+9, 2);
+                    blk.p_total = parse_uint(buf+addr+11, 2);
+                    blk.used_bits = buf[addr+13];
+                    blk.pause = parse_uint(buf+addr+14, 2);
+                    blk.len = parse_uint(buf+addr+16, 3);
 
-                    send_standard_block(pio, pulsegen_sm, blk, tape + addr + 19);
+                    send_standard_block(pio, pio_sm, blk, buf+addr+19);
 
                     break;
 
                 // Pure Tone
                 case BLK_TONE:
-                    blk.bit_zero = tape[addr + 1] | tape[addr + 2] << 8;
-                    blk.blklen = tape[addr + 3] | tape[addr + 4] << 8;
-                    send_pure_tone_block(pio, pulsegen_sm, (uint16_t)blk.blklen, blk.bit_zero);
+                    blk.bit_0 = parse_uint(buf+addr+1, 2);
+                    blk.len = parse_uint(buf+addr+3, 2);
+
+                    send_pure_tone(pio, pio_sm, (uint16_t)blk.len, blk.bit_0);
                     break;
 
                 // Pulse Sequence
                 case BLK_PULSES:
-                    send_pulse_array(pio, pulsegen_sm, tape[addr + 1], tape + addr + 2);
+                    send_pulse_array(pio, pio_sm, buf[addr+1], buf+addr+2);
                     break;
 
                 // Pure Data
                 case BLK_PDATA:
-                    blk.type = tape[addr];
-                    blk.bit_zero = tape[addr + 1] | tape[addr + 2] << 8;
-                    blk.bit_one = tape[addr + 3] | tape[addr + 4] << 8;
-                    blk.used_bits = tape[addr + 5];
-                    blk.pause = tape[addr + 6] | tape[addr + 7] << 8;
-                    blk.blklen = tape[addr + 8] | tape[addr + 9] << 8 | tape[addr + 10] << 16;
+                    blk.type = buf[addr];
+                    blk.bit_0 = parse_uint(buf+addr+1, 2);
+                    blk.bit_1 = parse_uint(buf+addr+3, 2);
+                    blk.used_bits = buf[addr+5];
+                    blk.pause = parse_uint(buf+addr+6, 2);
+                    blk.len = parse_uint(buf+addr+8, 3);
 
-                    send_standard_block(pio, pulsegen_sm, blk, tape + addr + 11);
+                    send_standard_block(pio, pio_sm, blk, buf+addr+11);
 
                     break;
 
                 // Direct Recording (Sampled)
                 case BLK_DIRECT:
-                    blk.type = tape[addr];
-                    blk.sample_ticks = tape[addr + 1] | tape[addr + 2] << 8;
-                    blk.pause = tape[addr + 3] | tape[addr + 4] << 8;
-                    blk.used_bits = tape[addr + 5];
-                    blk.blklen = tape[addr + 6] | tape[addr + 7] << 8 | tape[addr + 8] << 16;
+                    blk.sample_ticks = parse_uint(buf+addr+1, 2);
+                    blk.pause = parse_uint(buf+addr+3, 2);
+                    blk.used_bits = buf[addr+5];
+                    blk.len = parse_uint(buf+addr+6, 3);
 
-                    send_raw_block(pio, pulsegen_sm, blk, tape + addr + 9);
+                    send_raw_block(pio, pio_sm, blk, buf+addr+9);
 
                     break;
 
                 // Compressed Square Wave
                 case BLK_CSW:
-                    blk.blklen = tape[addr + 1] | tape[addr + 2] << 8 | tape[addr + 3] << 16 | tape[addr + 4] << 24;
-                    blk.pause = tape[addr + 5] | tape[addr + 6] << 8;
+                    blk.len = parse_uint(buf+addr+1, 4);
+                    blk.pause = parse_uint(buf+addr+5, 2);
 
                     // ZX Spectrum Hz / Sample Hz = t-state length
-                    blk.sample_ticks = FREQ / (tape[addr + 7] | tape[addr + 8] << 8 | tape[addr + 9] << 16);
+                    blk.sample_ticks = FREQ / parse_uint(buf+addr+7, 3);
 
                     // RLE or Z-RLE
-                    blk.compression = tape[addr + 10];
+                    blk.compression = buf[addr+10];
 
                     // Number of samples
-                    blk.d_total = tape[addr + 11] | tape[addr + 12] << 8 | tape[addr + 13] << 16 | tape[addr + 14] << 24;
+                    blk.d_total = parse_uint(buf+addr+11, 4);
 
-                    send_csw_block(pio, pulsegen_sm, blk, tape + addr + 15);
+                    send_csw_block(pio, pio_sm, blk, buf+addr+15);
 
                     break;
 
                 // Generalised - horrible mix of everything
                 case BLK_GENERAL:
-                    blk.blklen = tape[addr + 1] | tape[addr + 2] << 8 | tape[addr + 3] << 16 | tape[addr + 4] << 24;
-                    blk.pause = tape[addr + 5] | tape[addr + 6] << 8;
+                    blk.len = parse_uint(buf+addr+1, 4);
+                    blk.pause = parse_uint(buf+addr+5, 2);
 
                     // Pilot / Sync
-                    blk.p_total = tape[addr + 7] | tape[addr + 8] << 8 | tape[addr + 9] << 16 | tape[addr + 10] << 24;
-                    blk.p_max_pulses = tape[addr + 11];
-                    blk.p_symbols = tape[addr + 12];
+                    blk.p_total = parse_uint(buf+addr+7, 4);
+                    blk.p_max_pulses = buf[addr+11];
+                    blk.p_symbols = buf[addr+12];
 
                     // Data
-                    blk.d_total = tape[addr + 13] | tape[addr + 14] << 8 | tape[addr + 15] << 16 | tape[addr + 16] << 24;
-                    blk.d_max_pulses = tape[addr + 17];
-                    blk.d_symbols = tape[addr + 18];
+                    blk.p_total = parse_uint(buf+addr+13, 4);
+                    blk.d_max_pulses = buf[addr+17];
+                    blk.d_symbols = buf[addr+18];
 
-                    send_gen_block(pio, pulsegen_sm, blk, tape + addr + 19);
+                    send_gen_block(pio, pio_sm, blk, buf+addr+19);
 
                     break;
 
@@ -960,7 +966,17 @@ int main()
                  * Behaviour Blocks
                  */
                 case BLK_PAUSE:
-                    blk.pause = (tape[addr + 1] | tape[addr + 2] << 8) * 1000;
+                    /* From TZX specification: 
+                     * "A Pause block consists of a low pulse level...
+                     * ... To ensure that the last edge produced is properly 
+                     * finished there should be at least 1ms pause of the 
+                     * opposite level, after that the pulse should go low."
+                     */
+                    if (gpio_level == 1) {
+                        // If last edge goes high, do a 1 ms hold then drop LOW
+                        send_pulse(pio, pio_sm, (FREQ / 1000));
+                    }
+                    blk.pause = 1000 * parse_uint(buf+addr+1, 2);
                     break;
 
                 // Treated as a contiguous block for sequences
@@ -983,8 +999,8 @@ int main()
                 // Jump - Signed short word
                 case BLK_JUMP:
                 {
-                    // Need to figure out how a signed 16-bit int works
-                    int16_t offset = tape[addr + 1] | tape[addr + 2] << 8;
+                    // This is a signed 16-bit integer
+                    int16_t offset = buf[addr+1] | buf[addr+2] << 8;
 
                     // e.g. this is 5, next will be 6, but offset is -2
                     //   6 += (-2) - 1 = 3
@@ -994,7 +1010,7 @@ int main()
 
                 // Loop
                 case BLK_LOOP_START:
-                    loop_count = tape[addr + 1] | tape[addr + 2] << 8;
+                    loop_count = parse_uint(buf+addr+1, 2);
                     loop_start = block;
                     break;
 
@@ -1010,7 +1026,7 @@ int main()
 
                 // Sequence array
                 case BLK_SEQ_CALL:
-                    seq_size = tape[addr + 1] | tape[addr + 2] << 8;
+                    seq_size = parse_uint(buf+addr+1, 2);
 
                     seq_list = malloc(seq_size * sizeof(int16_t));
                     seq_live = 1;
@@ -1020,7 +1036,7 @@ int main()
                     // if not relative to each other, and just to start...
                     for (uint16_t x = 0; x < seq_size; x++)
                     {
-                        seq_list[x] = block + (tape[addr + 3 + (2 * x)] | tape[addr + 4 + (2 * x)] << 8);
+                        seq_list[x] = block + parse_uint(buf+addr+3+(2*x), 2);
                     }
 
                     break;
@@ -1036,20 +1052,28 @@ int main()
                     break;
 
                 case BLK_SEL:
-                    // May need buttons to advance the tape
+                    // Needs screen and menu to select an option
 
                     // Build the menu
-                    uint8_t menu_size = tape[addr + 3];
+                    uint8_t menu_size = buf[addr+3];
+                    // Storage for the offsets
                     int16_t *offset = NULL;
                     offset = malloc(sizeof(int16_t) * menu_size);
+                    // Storage for the names of the offsets
                     char(*names)[31] = malloc(sizeof(char[menu_size][31]));
+                    // skip first 4 bytes
                     int x = 4;
                     for (uint8_t y = 0; y < menu_size; y++)
                     {
-                        offset[y] = tape[addr + x] | tape[addr + x + 1] << 8;
-                        memcpy(names[y], &tape[addr + x + 3], tape[addr + x + 2]);
-                        names[y][tape[addr + x + 2]] = '\0';
-                        x += tape[addr + x + 2] + 3;
+                        // Offset could be behind/in-front, so signed 16-bit
+                        offset[y] = buf[addr+x] | buf[addr+x+1] << 8;
+                        // Copy out the name
+                        memcpy(names[y], &buf[addr+x+3], buf[addr+x+2]);
+                        // Terminate the string by size byte
+                        names[y][buf[addr+x+2]] = '\0';
+                        // skip name length + offset + size byte
+                        x += buf[addr+x+2] + 3;
+                        // We keep this printf() in to simulate the menu
                         printf("%u) %s @ %d\n", y, names[y], block + offset[y]);
                     }
 
@@ -1063,10 +1087,9 @@ int main()
                     break;
 
                 case BLK_SIG_LEVEL:
-                    // This might not be accurate if a sleep has happened
                     // If the value doesn't match last gpio_level
-                    if (gpio_level == tape[addr + 5])
-                        send_pulse(pio, pulsegen_sm, 0);
+                    if (gpio_level == buf[addr+5])
+                        send_pulse(pio, pio_sm, 0);
                     break;
 
                 /*
@@ -1075,7 +1098,7 @@ int main()
                 case BLK_TEXT:
                     break;
                 case BLK_MSG:
-                    blk.pause = tape[addr + 1] * 1000;
+                    blk.pause = buf[addr+1] * 1000;
                     sleep_ms(blk.pause);
                     break;
                 case BLK_INFO:
@@ -1090,16 +1113,16 @@ int main()
             else
             {   // Otherwise treat it like a TAP file
                 // First two bytes are the size
-                blk.blklen = tape[addr] | tape[addr + 1] << 8;
+                blk.len = parse_uint(buf+addr, 2);
 
                 // Third marker byte dictates the pilot length
-                if (tape[addr + 2] >= 0x80)
+                if (buf[addr+2] >= 0x80)
                     blk.p_total = 3223; // Data block
                 else
                     blk.p_total = 8063; // Header block
 
                 // Send for processing
-                send_standard_block(pio, pulsegen_sm, blk, tape + addr + 2);
+                send_standard_block(pio, pio_sm, blk, buf+addr+2);
 
                 // Set a default ause
                 blk.pause = 1000;
@@ -1118,7 +1141,7 @@ int main()
         block_start = NULL;
 
         // End playback and pause for 30 secs
-        printf("End of tape after: %u bytes\n\n", tapesize);
+        printf("End of file after: %u bytes\n\n", bufsize);
         sleep_ms(30000);
     }
 }

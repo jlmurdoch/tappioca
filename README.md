@@ -5,7 +5,7 @@ Play back ZX Spectrum TZX / TAP files over GPIO-powered audio using the [RP2040 
 ## Build
 (Optional) Add the following 3rd-party libraries into the sources directory if needed:
 - [no-OS-FatFS-SD-SPI-RPi-Pico](https://github.com/carlk3/no-OS-FatFS-SD-SPI-RPi-Pico) - for SD Card support for storing TZX and TAP files. Drop in `FatFS_SPI` directory into the main source directory.
-- [zlib-deflate-nostdlib](https://github.com/derf/zlib-deflate-nostdlib/) - for Zlib inflate support need by some rare CSW data blocks. Drop in `inflate.c` and `inflate.h`i into the main source directory.
+- [zlib-deflate-nostdlib](https://github.com/derf/zlib-deflate-nostdlib/) - for Zlib inflate support need by some rare CSW data blocks. Drop in `inflate.c` and `inflate.h` into the main source directory.
 
 Then configure and build:
 ```
