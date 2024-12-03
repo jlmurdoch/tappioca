@@ -858,7 +858,7 @@ int main()
 
                     // Next four bytes contain the pause and data length
                     blk.pause = parse_uint(buf+addr+1, 2);
-                    blk.pause = parse_uint(buf+addr+3, 2);
+                    blk.len = parse_uint(buf+addr+3, 2);
 
                     // Sixth marker byte dictates the pilot length
                     if (buf[addr+5] >= 0x80)
@@ -972,10 +972,12 @@ int main()
                      * finished there should be at least 1ms pause of the 
                      * opposite level, after that the pulse should go low."
                      */
-                    if (gpio_level == 1) {
-                        // If last edge goes high, do a 1 ms hold then drop LOW
-                        send_pulse(pio, pio_sm, (FREQ / 1000));
-                    }
+                    /*
+                     * if (gpio_level == 1) {
+                     *    // If last edge goes high, do a 1 ms hold then drop LOW
+                     *    send_pulse(pio, pio_sm, (FREQ / 1000));
+                     * }
+                     */
                     blk.pause = 1000 * parse_uint(buf+addr+1, 2);
                     break;
 
@@ -1074,7 +1076,7 @@ int main()
                         // skip name length + offset + size byte
                         x += buf[addr+x+2] + 3;
                         // We keep this printf() in to simulate the menu
-                        printf("%u) %s @ %d\n", y, names[y], block + offset[y]);
+                        // printf("%u) %s @ %d\n", y, names[y], block + offset[y]);
                     }
 
                     free(offset);
@@ -1124,7 +1126,7 @@ int main()
                 // Send for processing
                 send_standard_block(pio, pio_sm, blk, buf+addr+2);
 
-                // Set a default ause
+                // Set a default pause
                 blk.pause = 1000;
             }
 
@@ -1132,8 +1134,9 @@ int main()
             block++;
 
             // Pause as required
-            if (blk.pause > 0)
+            if (blk.pause > 0) {
                 sleep_ms(blk.pause);
+            }
         }
 
         // Clean up memory
