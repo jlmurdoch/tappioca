@@ -18,12 +18,6 @@ option(USE_ZLIB, "Use Zlib" OFF)
 if(USE_FATFS)
     add_subdirectory(no-OS-FatFS-SD-SPI-RPi-Pico/FatFs_SPI)
 endif(USE_FATFS)
-#if(USE_ZLIB)
-#    INSTALL (
-#        DIRECTORY ${CMAKE_SOURCE_DIR}/zlib-deflate-nostdlib/src/
-#        DESTINATION ${CMAKE_SOURCE_DIR}
-#        FILES_MATCHING PATTERN "inflate.*")
-#endif(USE_ZLIB)
 
 add_executable(tappioca)
 
